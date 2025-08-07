@@ -1,0 +1,6 @@
+# Ignore build artifacts
+build/
+
+# Ignore CMake user files
+CMakeUserPresets.json
+CMakePresets.json
