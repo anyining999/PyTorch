@@ -17,6 +17,14 @@ extern "C" {
  */
 void hello_from_rust();
 
+/**
+ * @brief Schedules a training job from a JSON configuration string.
+ * @param config_json A null-terminated C string containing the JSON
+ *                    representation of a TrainingConfig.
+ * @return 0 on success, a negative integer on failure.
+ */
+int schedule_training_from_json(const char* config_json);
+
 #ifdef __cplusplus
 }
 #endif
