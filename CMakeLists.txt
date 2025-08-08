@@ -15,6 +15,18 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# --- Corrosion (Rust/CMake Integration) ---
+include(FetchContent)
+FetchContent_Declare(
+  Corrosion
+  GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+  GIT_TAG v0.4.5 # Using a specific, stable version
+)
+FetchContent_MakeAvailable(Corrosion)
+
+# Import the Rust scheduler crate by pointing to its Cargo.toml
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/rust_scheduler/Cargo.toml)
+
 add_subdirectory(src/cpp_core)
 
 # --- Testing ---
