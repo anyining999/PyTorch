@@ -24,7 +24,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Corrosion)
 
-# Import the Rust scheduler crate by pointing to its Cargo.toml
+# Import the Rust scheduler crate.
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/src/rust_scheduler/Cargo.toml)
 
 add_subdirectory(src/cpp_core)

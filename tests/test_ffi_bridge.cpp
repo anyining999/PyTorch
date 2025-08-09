@@ -48,7 +48,27 @@ TEST(FFIBridgeTest, CanScheduleTrainingFromJson) {
     }
     )json";
 
-    // Call the FFI function and assert that it returns 0 (success).
-    int status = schedule_training_from_json(json_config);
-    ASSERT_EQ(status, 0);
+    // Call the FFI function and assert that it returns a positive task ID on success.
+    long long task_id = schedule_training_from_json(json_config);
+    ASSERT_GT(task_id, 0);
+}
+
+TEST(FFIBridgeTest, FailsGracefullyOnImpossibleAllocation) {
+    // This JSON requests an impossibly large amount of memory by setting
+    // the learning_rate, which our mock allocation logic uses as the memory request.
+    const char* json_config = R"json(
+    {
+      "model": {
+        "id": "impossible_model",
+        "layers": [],
+        "config": { "learning_rate": 99999.0 },
+        "metadata": { "properties": {} }
+      },
+      "optimizer": {}, "scheduler": {}, "quantization": {}, "distributed": {}
+    }
+    )json";
+
+    long long task_id = schedule_training_from_json(json_config);
+    // Expect the specific error code for resource allocation failure
+    ASSERT_EQ(task_id, -10);
 }

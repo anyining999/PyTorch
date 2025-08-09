@@ -79,6 +79,48 @@ pub struct TrainingConfig {
 #[derive(Debug)]
 pub struct Resources;
 
+// A placeholder representing a single unit of work to be scheduled.
+#[derive(Debug)]
+pub struct Task {
+    pub id: u64,
+    pub config: TrainingConfig,
+    pub resources: Resources,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceState {
+    Available,
+    InUse,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceResource {
+    pub id: u32,
+    pub memory_mb: u64,
+    pub state: ResourceState,
+}
+
+// The ResourcePool now manages a list of devices.
+#[derive(Debug, Clone, Default)]
+pub struct ResourcePool {
+    pub devices: Vec<DeviceResource>,
+}
+
+impl ResourcePool {
+    // A simple allocation strategy: find the first available device
+    // that has enough memory.
+    pub fn allocate(&mut self, required_memory_mb: u64) -> std::result::Result<&mut DeviceResource, &'static str> {
+        if let Some(device) = self.devices.iter_mut().find(|d| {
+            d.state == ResourceState::Available && d.memory_mb >= required_memory_mb
+        }) {
+            device.state = ResourceState::InUse;
+            Ok(device)
+        } else {
+            Err("No suitable device available")
+        }
+    }
+}
+
 // A handle to a running training job, which allows for awaiting its completion.
 #[derive(Debug)]
 pub struct TrainingHandle {
