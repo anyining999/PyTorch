@@ -1,8 +1,10 @@
-add_library(redcode_core INTERFACE)
+# Define the library as STATIC since it now has source files to compile.
+add_library(redcode_core STATIC
+    src/phi_neuron.cu
+)
 
 # The core library needs to know where its own headers are.
-# The generated headers are now in a subdirectory of the include path.
 target_include_directories(redcode_core
-    INTERFACE
+    PUBLIC # Use PUBLIC so consumers of this library also get the include path.
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
