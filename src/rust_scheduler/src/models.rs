@@ -60,8 +60,20 @@ pub struct RedModel {
 pub struct OptimizerConfig {}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SchedulerConfig {}
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct QuantizationConfig {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QuantizationMode {
+    PTQ, // Post-Training Quantization
+    QAT, // Quantization-Aware Training
+    Dynamic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantizationConfig {
+    pub mode: QuantizationMode,
+    pub bits: u8, // e.g., 8, 4, 2
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DistributedConfig {}
 

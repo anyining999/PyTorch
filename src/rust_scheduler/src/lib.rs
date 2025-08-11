@@ -1,5 +1,6 @@
 pub mod models;
 pub mod error;
+pub mod quantization_manager;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
