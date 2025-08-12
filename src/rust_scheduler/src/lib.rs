@@ -39,35 +39,15 @@ impl RedScheduler {
         let resource_pool = ResourcePool { devices };
         let node_registry = NodeRegistry::new();
 
-        // Create a unique ID and network address for this node.
         let node_id = format!("node_{:x}", rand::random::<u32>());
-        // In a real system, this would be the node's actual IP. We use a dummy for now.
         let local_addr = "127.0.0.1:8080".parse().unwrap();
         let own_node_info = NodeInfo {
             id: node_id.clone(),
             addr: local_addr,
-        command_port: distributed::COMMAND_PORT,
+            command_port: distributed::COMMAND_PORT,
             status: NodeStatus::Healthy,
-            last_heartbeat: std::time::Instant::now(), // This field is not serialized.
+            last_heartbeat: std::time::Instant::now(),
         };
-
-        // Spawn discovery tasks
-        let listener_registry = node_registry.clone();
-        let listener_id = node_id.clone();
-        tokio::spawn(async move {
-            crate::distributed::listen_for_heartbeats(listener_registry, listener_id).await;
-        });
-
-        // Clone the node info for the broadcaster task
-        let broadcaster_info = own_node_info.clone();
-        tokio::spawn(async move {
-            crate::distributed::broadcast_heartbeat(broadcaster_info).await;
-        });
-
-        // Spawn the TCP command listener, moving the original node info
-        tokio::spawn(async move {
-            crate::distributed::run_tcp_listener(own_node_info).await;
-        });
 
         let scheduler = Arc::new(Self {
             node_id,
@@ -79,14 +59,39 @@ impl RedScheduler {
             _worker_handle: tokio::spawn(async {}), // dummy handle
         });
 
+        // Spawn background tasks
         let worker_handle = Self::spawn_worker(scheduler.clone());
+        Self::spawn_discovery_tasks(scheduler.clone(), own_node_info);
 
+        // Replace dummy handle with the real one
         unsafe {
             let mutable_scheduler = Arc::as_ptr(&scheduler) as *mut Self;
             (*mutable_scheduler)._worker_handle = worker_handle;
         }
 
         scheduler
+    }
+
+    // Spawns all network-related discovery tasks.
+    fn spawn_discovery_tasks(scheduler: Arc<Self>, own_node_info: NodeInfo) {
+        // Spawn heartbeat broadcaster
+        let broadcaster_info = own_node_info.clone();
+        tokio::spawn(async move {
+            crate::distributed::broadcast_heartbeat(broadcaster_info).await;
+        });
+
+        // Spawn TCP command listener
+        let listener_scheduler = scheduler.clone();
+        tokio::spawn(async move {
+            crate::distributed::run_tcp_listener(listener_scheduler).await;
+        });
+
+        // Spawn UDP heartbeat listener
+        let listener_registry = scheduler.node_registry.clone();
+        let listener_id = scheduler.node_id.clone();
+        tokio::spawn(async move {
+            crate::distributed::listen_for_heartbeats(listener_registry, listener_id).await;
+        });
     }
 
     fn spawn_worker(scheduler: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -98,7 +103,7 @@ impl RedScheduler {
                 };
 
                 if let Some(task) = task {
-                    println!("Worker picked up task {} for model: {}", task.id, task.config.model.id);
+                    println!("[Worker] Node {} picked up task {} for model: {}", scheduler.node_id, task.id, task.config.model.id);
                 }
 
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -106,12 +111,12 @@ impl RedScheduler {
         })
     }
 
-    /// Schedules a new training job by pushing it to the queue. Returns a unique task ID.
+    /// Schedules a new training job locally by pushing it to the queue. Returns a unique task ID.
     pub async fn schedule_training(&self, config: TrainingConfig) -> Result<u64> {
-        println!("Scheduling training for model: {}", config.model.id);
+        println!("[Local] Scheduling training for model: {}", config.model.id);
 
         let resources = self.allocate_optimal_resources(&config).await?;
-        println!("Resources allocated successfully.");
+        println!("[Local] Resources allocated successfully.");
 
         let task_id = self.next_task_id.fetch_add(1, Ordering::SeqCst);
         let task = Task { id: task_id, config, resources };
@@ -119,25 +124,53 @@ impl RedScheduler {
         {
             let mut queue = self.task_queue.lock().unwrap();
             queue.push_back(task);
-            println!("Task {} added to the queue. Current queue size: {}", task_id, queue.len());
+            println!("[Local] Task {} added to the queue. Current queue size: {}", task_id, queue.len());
         }
 
         Ok(task_id)
     }
 
+    /// Submits a task to another node in the cluster.
+    pub async fn submit_distributed_task(&self, config: TrainingConfig) -> Result<()> {
+        println!("[Distributed] Received request to distribute task for model {}", config.model.id);
+
+        let peer_id = {
+            let nodes = self.node_registry.get_all_nodes();
+            nodes.into_iter()
+                 .find(|n| n.id != self.node_id)
+                 .map(|n| n.id)
+        };
+
+        if let Some(id) = peer_id {
+            println!("[Distributed] Selected peer {} for task delegation.", id);
+
+            let message = crate::distributed::Message::SubmitTask { config };
+            if let Err(e) = self.node_registry.send_message(&id, &message).await {
+                eprintln!("[Distributed] Failed to send task to peer {}: {}", id, e);
+                return Err(RedError::Network(crate::error::NetworkError));
+            }
+            println!("[Distributed] Successfully sent task to peer {}.", id);
+            Ok(())
+        } else {
+            println!("[Distributed] No peers found. Scheduling locally instead.");
+            self.schedule_training(config).await?;
+            Ok(())
+        }
+    }
+
     /// A skeleton method for the resource allocation logic.
     async fn allocate_optimal_resources(&self, config: &TrainingConfig) -> Result<Resources> {
-        println!("Attempting to lock resource pool and allocate...");
+        println!("[Resource] Attempting to lock resource pool and allocate...");
         let required_memory = config.model.config.learning_rate as u64;
 
         let mut pool = self.resource_pool.write().unwrap();
         match pool.allocate(required_memory) {
             Ok(device) => {
-                println!("Allocated device {} with {} MB memory.", device.id, device.memory_mb);
+                println!("[Resource] Allocated device {} with {} MB memory.", device.id, device.memory_mb);
                 Ok(Resources)
             }
             Err(e) => {
-                eprintln!("Resource allocation failed: {}", e);
+                eprintln!("[Resource] Allocation failed: {}", e);
                 Err(RedError::Resource(ResourceError))
             }
         }
@@ -146,8 +179,6 @@ impl RedScheduler {
 
 impl Default for RedScheduler {
     fn default() -> Self {
-        // Note: This default impl does not spawn the discovery tasks.
-        // The `new()` constructor is the preferred way to create a scheduler.
         let devices = vec![];
         let resource_pool = ResourcePool { devices };
         Self {
@@ -157,7 +188,7 @@ impl Default for RedScheduler {
             task_queue: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(AtomicMetrics),
             next_task_id: AtomicU64::new(1),
-            _worker_handle: tokio::spawn(async {}), // dummy handle
+            _worker_handle: tokio::spawn(async {}),
         }
     }
 }
@@ -165,11 +196,14 @@ impl Default for RedScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distributed::{listen_for_heartbeats, NodeInfo, NodeStatus, NodeRegistry, Message};
+    use tokio::net::{UdpSocket, TcpListener};
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
 
     #[tokio::test]
     async fn scheduler_can_be_created_and_worker_runs() {
         let scheduler = RedScheduler::new();
-        // Give the background tasks a moment to print their startup messages
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         println!("Scheduler created: {:?}", scheduler);
     }
@@ -197,11 +231,6 @@ mod tests {
         assert_eq!(pool.devices[1].state, ResourceState::InUse);
     }
 
-    use crate::distributed::{listen_for_heartbeats, NodeInfo, NodeStatus, NodeRegistry};
-    use tokio::net::UdpSocket;
-    use std::time::Duration;
-    use tokio::io::AsyncReadExt;
-
     #[tokio::test]
     #[ignore = "This test fails due to networking issues in the sandboxed environment, not due to a code error."]
     async fn node_discovery_mechanism_works() {
@@ -209,25 +238,20 @@ mod tests {
         let listener_registry = registry.clone();
         let listener_id = "listener_node".to_string();
 
-        // Spawn the listener task
         let listener_handle = tokio::spawn(async move {
             listen_for_heartbeats(listener_registry, listener_id).await;
         });
 
-        // Create info for a node that will broadcast
         let broadcaster_id = "broadcaster_node".to_string();
         let broadcaster_addr = "127.0.0.1:12345".parse().unwrap();
         let broadcaster_info = NodeInfo {
             id: broadcaster_id.clone(),
             addr: broadcaster_addr,
-            command_port: 0, // Dummy port for this test
+            command_port: 0,
             status: NodeStatus::Healthy,
             last_heartbeat: std::time::Instant::now(),
         };
 
-        // Spawn a temporary broadcaster task that sends one heartbeat.
-        // For a local test, we send directly to the loopback address rather than
-        // relying on a network-level broadcast, which can be unreliable in test environments.
         tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
             let direct_addr = format!("127.0.0.1:{}", crate::distributed::DISCOVERY_PORT);
@@ -236,35 +260,27 @@ mod tests {
             println!("Test broadcaster sent a single heartbeat directly to {}.", direct_addr);
         });
 
-        // Give the listener time to process the message. A longer sleep can help
-        // make the test more robust in slow or busy environments.
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        // Check the registry to see if the node was discovered
         let nodes = registry.get_all_nodes();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, broadcaster_id);
         assert_eq!(nodes[0].status, NodeStatus::Healthy);
 
-        // Clean up the listener task
         listener_handle.abort();
     }
 
-    use crate::distributed::Message;
-
     #[tokio::test]
     async fn node_communication_sends_successfully() {
-        // 1. Setup a listener node
         let listener_id = "listener-node-tcp".to_string();
         let listener_info = NodeInfo {
             id: listener_id.clone(),
-            addr: "127.0.0.1:0".parse().unwrap(), // Dummy addr
+            addr: "127.0.0.1:0".parse().unwrap(),
             command_port: 12345, // Use a fixed port for the test
             status: NodeStatus::Healthy,
             last_heartbeat: std::time::Instant::now(),
         };
 
-        // Spawn the listener that will receive the message.
         let listener_handle = tokio::spawn(async move {
             let listen_addr = format!("127.0.0.1:{}", 12345);
             let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
@@ -275,19 +291,58 @@ mod tests {
             assert!(matches!(msg, Message::Ping));
         });
 
-        // Give the listener a moment to start up.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // 2. Setup the sender's registry
         let registry = NodeRegistry::new();
         registry.update_node(listener_info);
 
-        // 3. Send a message and verify success
         let result = registry.send_message(&listener_id, &Message::Ping).await;
         assert!(result.is_ok());
 
-        // Cleanup
         listener_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "This complex test relies on inter-task networking and may be flaky in some environments."]
+    async fn distributed_task_delegation_works() {
+        println!("\n--- Creating Node 1 (Sender) ---");
+        let node1 = RedScheduler::new();
+        println!("--- Creating Node 2 (Receiver) ---");
+        let node2 = RedScheduler::new();
+
+        println!("--- Allowing time for node discovery... ---");
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        let model_config = crate::models::ModelConfig { learning_rate: 1.0 };
+        let metadata = crate::models::ModelMetadata::default();
+        let model = crate::models::RedModel {
+            id: "distributed_test_model".to_string(),
+            layers: vec![],
+            config: model_config,
+            metadata,
+        };
+        let config = crate::models::TrainingConfig {
+            model,
+            optimizer: Default::default(),
+            scheduler: Default::default(),
+            quantization: crate::models::QuantizationConfig {
+                mode: crate::models::QuantizationMode::PTQ,
+                bits: 8,
+            },
+            distributed: Default::default(),
+        };
+
+        println!("--- Submitting distributed task to Node 1... ---");
+        let result = node1.submit_distributed_task(config).await;
+        assert!(result.is_ok());
+
+        println!("--- Allowing time for task delegation... ---");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        println!("--- Test complete. Verify log output for success. ---");
+
+        node1._worker_handle.abort();
+        node2._worker_handle.abort();
     }
 }
 

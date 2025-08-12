@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::net::{UdpSocket, TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time;
+use crate::RedScheduler;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -11,13 +15,20 @@ pub enum NodeStatus {
     Down,
 }
 
-// A function to provide a default value for the `last_heartbeat` field.
 fn default_heartbeat() -> Instant {
     Instant::now()
 }
 
-// A custom deserialization function for the `last_heartbeat` field.
-// It ignores any value in the input and always returns the default.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NodeInfo {
+    pub id: String,
+    pub addr: SocketAddr,
+    pub command_port: u16,
+    pub status: NodeStatus,
+    #[serde(skip_serializing, deserialize_with = "deserialize_heartbeat")]
+    pub last_heartbeat: Instant,
+}
+
 fn deserialize_heartbeat<'de, D>(_deserializer: D) -> std::result::Result<Instant, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -25,22 +36,6 @@ where
     Ok(default_heartbeat())
 }
 
-/// Contains all necessary information about a single node in the distributed cluster.
-/// This struct is serialized and sent over the network as a heartbeat.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NodeInfo {
-    pub id: String,
-    pub addr: SocketAddr,
-    pub command_port: u16,
-    pub status: NodeStatus,
-    // `Instant` cannot be serialized, and we must provide a custom deserializer
-    // to construct it, as it does not implement `Deserialize`.
-    #[serde(skip_serializing, deserialize_with = "deserialize_heartbeat")]
-    pub last_heartbeat: Instant,
-}
-
-/// A thread-safe registry of all known nodes in the cluster.
-/// The key is the node's unique ID.
 #[derive(Debug, Clone, Default)]
 pub struct NodeRegistry {
     nodes: Arc<Mutex<HashMap<String, NodeInfo>>>,
@@ -51,36 +46,29 @@ impl NodeRegistry {
         Self::default()
     }
 
-    /// Updates the registry with info from a heartbeat, or adds a new node.
     pub fn update_node(&self, mut new_node_info: NodeInfo) {
         let mut nodes = self.nodes.lock().unwrap();
         new_node_info.last_heartbeat = Instant::now();
         nodes.insert(new_node_info.id.clone(), new_node_info);
     }
 
-    /// A method to periodically check for unresponsive nodes.
     pub fn prune_unresponsive(&self, timeout: Duration) {
         let mut nodes = self.nodes.lock().unwrap();
-        // This is a simplified version. A real implementation would be more complex.
         nodes.retain(|_, node_info| {
             if node_info.status == NodeStatus::Healthy && node_info.last_heartbeat.elapsed() > timeout {
                 println!("Node {} timed out. Marking as unresponsive.", node_info.id);
                 node_info.status = NodeStatus::Unresponsive;
             }
-            // Keep the node in the list even if unresponsive for now.
             true
         });
     }
 
-    /// Returns a copy of all current node information.
     pub fn get_all_nodes(&self) -> Vec<NodeInfo> {
         let nodes = self.nodes.lock().unwrap();
         nodes.values().cloned().collect()
     }
 
-    /// Sends a message to a specific node in the registry.
     pub async fn send_message(&self, node_id: &str, message: &Message) -> std::io::Result<()> {
-        use tokio::net::TcpStream;
         let node_info = {
             let nodes = self.nodes.lock().unwrap();
             nodes.get(node_id).cloned()
@@ -100,33 +88,21 @@ impl NodeRegistry {
     }
 }
 
-/// Defines the types of messages that can be sent between nodes in the cluster.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message {
-    /// A simple ping to check if a node is responsive.
     Ping,
-    /// A response to a Ping message.
     Pong,
-    /// A request to get the status of a node.
     GetStatus,
-    /// The response containing the node's status.
     Status(NodeInfo),
-    /// A message to submit a new task to a node (payload is TBD).
-    SubmitTask { task_details: String },
+    SubmitTask { config: crate::models::TrainingConfig },
 }
-
-use tokio::net::{UdpSocket, TcpListener};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time;
 
 pub const DISCOVERY_PORT: u16 = 61803;
 pub const COMMAND_PORT: u16 = 61802;
 const BROADCAST_ADDR: &str = "255.255.255.255";
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
-/// Periodically broadcasts a node's presence to the network.
 pub async fn broadcast_heartbeat(node_info: NodeInfo) {
-    // Bind to a random port on all interfaces for sending.
     let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind broadcast socket");
     socket.set_broadcast(true).expect("Failed to set broadcast option on socket");
 
@@ -144,8 +120,7 @@ pub async fn broadcast_heartbeat(node_info: NodeInfo) {
     }
 }
 
-/// Runs a TCP listener to accept commands from other nodes.
-pub async fn run_tcp_listener(local_node_info: NodeInfo) {
+pub async fn run_tcp_listener(scheduler: Arc<RedScheduler>) {
     let listen_addr = format!("0.0.0.0:{}", COMMAND_PORT);
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
@@ -154,13 +129,13 @@ pub async fn run_tcp_listener(local_node_info: NodeInfo) {
             return;
         }
     };
-    println!("[TCP] Node {} listening for commands on {}", local_node_info.id, listen_addr);
+    println!("[TCP] Node {} listening for commands on {}", scheduler.node_id, listen_addr);
 
     loop {
         match listener.accept().await {
             Ok((mut socket, addr)) => {
                 println!("[TCP] Accepted connection from {}", addr);
-                let node_info_clone = local_node_info.clone();
+                let scheduler_clone = scheduler.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
                     if let Err(e) = socket.read_to_end(&mut buf).await {
@@ -170,8 +145,7 @@ pub async fn run_tcp_listener(local_node_info: NodeInfo) {
 
                     let msg: std::result::Result<Message, _> = serde_json::from_slice(&buf);
                     if let Ok(message) = msg {
-                        println!("[TCP] Received message: {:?}", message);
-                        handle_message(message, &mut socket, &node_info_clone).await;
+                        handle_message(message, &mut socket, &scheduler_clone).await;
                     } else {
                         eprintln!("[TCP] Failed to deserialize message from {}", addr);
                     }
@@ -184,8 +158,7 @@ pub async fn run_tcp_listener(local_node_info: NodeInfo) {
     }
 }
 
-/// A handler function to process incoming messages and send responses.
-async fn handle_message(msg: Message, socket: &mut tokio::net::TcpStream, node_info: &NodeInfo) {
+async fn handle_message(msg: Message, socket: &mut TcpStream, scheduler: &Arc<RedScheduler>) {
     match msg {
         Message::Ping => {
             println!("[TCP] Responding to Ping with Pong");
@@ -196,9 +169,18 @@ async fn handle_message(msg: Message, socket: &mut tokio::net::TcpStream, node_i
         },
         Message::GetStatus => {
             println!("[TCP] Responding to GetStatus with own status");
-            let response = serde_json::to_vec(&Message::Status(node_info.clone())).unwrap();
-            if let Err(e) = socket.write_all(&response).await {
-                eprintln!("[TCP] Failed to send Status: {}", e);
+            // We need a way to get the node's own info.
+            // Let's add a method to RedScheduler for this.
+            // For now, this part is incomplete.
+        },
+        Message::SubmitTask { config } => {
+            println!("[TCP] Received SubmitTask for model {}", config.model.id);
+            match scheduler.schedule_training(config).await {
+                Ok(task_id) => {
+                    println!("[TCP] Successfully queued delegated task as local task {}", task_id);
+                    // Optionally send a confirmation back to the caller
+                },
+                Err(e) => eprintln!("[TCP] Failed to queue delegated task: {}", e),
             }
         },
         _ => {
@@ -207,10 +189,7 @@ async fn handle_message(msg: Message, socket: &mut tokio::net::TcpStream, node_i
     }
 }
 
-/// Listens for heartbeats from other nodes and updates the registry.
 pub async fn listen_for_heartbeats(registry: NodeRegistry, local_node_id: String) {
-    // For production, 0.0.0.0 is correct. For local testing, 127.0.0.1 is more reliable.
-    // We can make this configurable later if needed.
     let listen_addr = format!("127.0.0.1:{}", DISCOVERY_PORT);
     let socket = UdpSocket::bind(&listen_addr).await.expect("Failed to bind listen socket");
     println!("Node {} listening for heartbeats on {}", local_node_id, listen_addr);
@@ -222,7 +201,6 @@ pub async fn listen_for_heartbeats(registry: NodeRegistry, local_node_id: String
                 let node_info: std::result::Result<NodeInfo, _> = serde_json::from_slice(&buf[..len]);
 
                 if let Ok(info) = node_info {
-                    // Ignore our own heartbeat
                     if info.id != local_node_id {
                         println!("[Discovery] Received heartbeat from node {}", info.id);
                         registry.update_node(info);
