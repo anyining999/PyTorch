@@ -46,6 +46,7 @@ impl RedScheduler {
         let own_node_info = NodeInfo {
             id: node_id.clone(),
             addr: local_addr,
+        command_port: distributed::COMMAND_PORT,
             status: NodeStatus::Healthy,
             last_heartbeat: std::time::Instant::now(), // This field is not serialized.
         };
@@ -57,8 +58,15 @@ impl RedScheduler {
             crate::distributed::listen_for_heartbeats(listener_registry, listener_id).await;
         });
 
+        // Clone the node info for the broadcaster task
+        let broadcaster_info = own_node_info.clone();
         tokio::spawn(async move {
-            crate::distributed::broadcast_heartbeat(own_node_info).await;
+            crate::distributed::broadcast_heartbeat(broadcaster_info).await;
+        });
+
+        // Spawn the TCP command listener, moving the original node info
+        tokio::spawn(async move {
+            crate::distributed::run_tcp_listener(own_node_info).await;
         });
 
         let scheduler = Arc::new(Self {
@@ -192,6 +200,7 @@ mod tests {
     use crate::distributed::{listen_for_heartbeats, NodeInfo, NodeStatus, NodeRegistry};
     use tokio::net::UdpSocket;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
 
     #[tokio::test]
     #[ignore = "This test fails due to networking issues in the sandboxed environment, not due to a code error."]
@@ -211,6 +220,7 @@ mod tests {
         let broadcaster_info = NodeInfo {
             id: broadcaster_id.clone(),
             addr: broadcaster_addr,
+            command_port: 0, // Dummy port for this test
             status: NodeStatus::Healthy,
             last_heartbeat: std::time::Instant::now(),
         };
@@ -238,6 +248,46 @@ mod tests {
 
         // Clean up the listener task
         listener_handle.abort();
+    }
+
+    use crate::distributed::Message;
+
+    #[tokio::test]
+    async fn node_communication_sends_successfully() {
+        // 1. Setup a listener node
+        let listener_id = "listener-node-tcp".to_string();
+        let listener_info = NodeInfo {
+            id: listener_id.clone(),
+            addr: "127.0.0.1:0".parse().unwrap(), // Dummy addr
+            command_port: 12345, // Use a fixed port for the test
+            status: NodeStatus::Healthy,
+            last_heartbeat: std::time::Instant::now(),
+        };
+
+        // Spawn the listener that will receive the message.
+        let listener_handle = tokio::spawn(async move {
+            let listen_addr = format!("127.0.0.1:{}", 12345);
+            let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            socket.read_to_end(&mut buf).await.unwrap();
+            let msg: Message = serde_json::from_slice(&buf).unwrap();
+            assert!(matches!(msg, Message::Ping));
+        });
+
+        // Give the listener a moment to start up.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // 2. Setup the sender's registry
+        let registry = NodeRegistry::new();
+        registry.update_node(listener_info);
+
+        // 3. Send a message and verify success
+        let result = registry.send_message(&listener_id, &Message::Ping).await;
+        assert!(result.is_ok());
+
+        // Cleanup
+        listener_handle.await.unwrap();
     }
 }
 

@@ -31,6 +31,7 @@ where
 pub struct NodeInfo {
     pub id: String,
     pub addr: SocketAddr,
+    pub command_port: u16,
     pub status: NodeStatus,
     // `Instant` cannot be serialized, and we must provide a custom deserializer
     // to construct it, as it does not implement `Deserialize`.
@@ -76,12 +77,50 @@ impl NodeRegistry {
         let nodes = self.nodes.lock().unwrap();
         nodes.values().cloned().collect()
     }
+
+    /// Sends a message to a specific node in the registry.
+    pub async fn send_message(&self, node_id: &str, message: &Message) -> std::io::Result<()> {
+        use tokio::net::TcpStream;
+        let node_info = {
+            let nodes = self.nodes.lock().unwrap();
+            nodes.get(node_id).cloned()
+        };
+
+        if let Some(info) = node_info {
+            let addr = format!("{}:{}", info.addr.ip(), info.command_port);
+            println!("[TCP] Sending message {:?} to node {} at {}", message, node_id, addr);
+
+            let mut stream = TcpStream::connect(&addr).await?;
+            let serialized_msg = serde_json::to_vec(message).unwrap();
+            stream.write_all(&serialized_msg).await?;
+            Ok(())
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Node not found in registry"))
+        }
+    }
 }
 
-use tokio::net::UdpSocket;
+/// Defines the types of messages that can be sent between nodes in the cluster.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Message {
+    /// A simple ping to check if a node is responsive.
+    Ping,
+    /// A response to a Ping message.
+    Pong,
+    /// A request to get the status of a node.
+    GetStatus,
+    /// The response containing the node's status.
+    Status(NodeInfo),
+    /// A message to submit a new task to a node (payload is TBD).
+    SubmitTask { task_details: String },
+}
+
+use tokio::net::{UdpSocket, TcpListener};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time;
 
 pub const DISCOVERY_PORT: u16 = 61803;
+pub const COMMAND_PORT: u16 = 61802;
 const BROADCAST_ADDR: &str = "255.255.255.255";
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
@@ -101,6 +140,69 @@ pub async fn broadcast_heartbeat(node_info: NodeInfo) {
 
         if let Err(e) = socket.send_to(&serialized_info, &broadcast_addr).await {
             eprintln!("[Heartbeat] Failed to broadcast presence: {}", e);
+        }
+    }
+}
+
+/// Runs a TCP listener to accept commands from other nodes.
+pub async fn run_tcp_listener(local_node_info: NodeInfo) {
+    let listen_addr = format!("0.0.0.0:{}", COMMAND_PORT);
+    let listener = match TcpListener::bind(&listen_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[TCP] Failed to bind listener on {}: {}", listen_addr, e);
+            return;
+        }
+    };
+    println!("[TCP] Node {} listening for commands on {}", local_node_info.id, listen_addr);
+
+    loop {
+        match listener.accept().await {
+            Ok((mut socket, addr)) => {
+                println!("[TCP] Accepted connection from {}", addr);
+                let node_info_clone = local_node_info.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    if let Err(e) = socket.read_to_end(&mut buf).await {
+                        eprintln!("[TCP] Failed to read data from socket: {}", e);
+                        return;
+                    }
+
+                    let msg: std::result::Result<Message, _> = serde_json::from_slice(&buf);
+                    if let Ok(message) = msg {
+                        println!("[TCP] Received message: {:?}", message);
+                        handle_message(message, &mut socket, &node_info_clone).await;
+                    } else {
+                        eprintln!("[TCP] Failed to deserialize message from {}", addr);
+                    }
+                });
+            },
+            Err(e) => {
+                eprintln!("[TCP] Failed to accept connection: {}", e);
+            }
+        }
+    }
+}
+
+/// A handler function to process incoming messages and send responses.
+async fn handle_message(msg: Message, socket: &mut tokio::net::TcpStream, node_info: &NodeInfo) {
+    match msg {
+        Message::Ping => {
+            println!("[TCP] Responding to Ping with Pong");
+            let response = serde_json::to_vec(&Message::Pong).unwrap();
+            if let Err(e) = socket.write_all(&response).await {
+                eprintln!("[TCP] Failed to send Pong: {}", e);
+            }
+        },
+        Message::GetStatus => {
+            println!("[TCP] Responding to GetStatus with own status");
+            let response = serde_json::to_vec(&Message::Status(node_info.clone())).unwrap();
+            if let Err(e) = socket.write_all(&response).await {
+                eprintln!("[TCP] Failed to send Status: {}", e);
+            }
+        },
+        _ => {
+            println!("[TCP] Received unhandled message type: {:?}", msg);
         }
     }
 }
