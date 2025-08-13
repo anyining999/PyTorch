@@ -2,6 +2,7 @@ pub mod models;
 pub mod error;
 pub mod quantization_manager;
 pub mod distributed;
+pub mod data_pipeline;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
@@ -412,10 +413,7 @@ mod tests {
             model,
             optimizer: Default::default(),
             scheduler: Default::default(),
-            quantization: crate::models::QuantizationConfig {
-                mode: crate::models::QuantizationMode::PTQ,
-                bits: 8,
-            },
+            quantization: Default::default(),
             distributed: Default::default(),
         };
 
