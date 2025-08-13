@@ -55,8 +55,10 @@ impl NodeRegistry {
     pub fn prune_unresponsive(&self, timeout: Duration) {
         let mut nodes = self.nodes.lock().unwrap();
         nodes.retain(|_, node_info| {
-            if node_info.status == NodeStatus::Healthy && node_info.last_heartbeat.elapsed() > timeout {
-                println!("Node {} timed out. Marking as unresponsive.", node_info.id);
+            let elapsed = node_info.last_heartbeat.elapsed();
+            if node_info.status == NodeStatus::Healthy && elapsed > timeout {
+                println!("[Pruner] Node {} timed out (elapsed: {:?} > timeout: {:?}). Marking as unresponsive.",
+                    node_info.id, elapsed, timeout);
                 node_info.status = NodeStatus::Unresponsive;
             }
             true
@@ -66,6 +68,13 @@ impl NodeRegistry {
     pub fn get_all_nodes(&self) -> Vec<NodeInfo> {
         let nodes = self.nodes.lock().unwrap();
         nodes.values().cloned().collect()
+    }
+
+    // This function is for testing purposes only to insert a node with a specific state.
+    #[cfg(test)]
+    pub(crate) fn add_node_for_test(&self, node_info: NodeInfo) {
+        let mut nodes = self.nodes.lock().unwrap();
+        nodes.insert(node_info.id.clone(), node_info);
     }
 
     pub async fn send_message(&self, node_id: &str, message: &Message) -> std::io::Result<()> {

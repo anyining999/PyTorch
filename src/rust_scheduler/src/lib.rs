@@ -92,6 +92,17 @@ impl RedScheduler {
         tokio::spawn(async move {
             crate::distributed::listen_for_heartbeats(listener_registry, listener_id).await;
         });
+
+        // Spawn the node pruning task
+        let registry_pruner = scheduler.node_registry.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                println!("[Pruner] Checking for unresponsive nodes...");
+                registry_pruner.prune_unresponsive(std::time::Duration::from_secs(30));
+            }
+        });
     }
 
     fn spawn_worker(scheduler: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -137,7 +148,7 @@ impl RedScheduler {
         let peer_id = {
             let nodes = self.node_registry.get_all_nodes();
             nodes.into_iter()
-                 .find(|n| n.id != self.node_id)
+                 .find(|n| n.id != self.node_id && n.status == NodeStatus::Healthy)
                  .map(|n| n.id)
         };
 
@@ -343,6 +354,73 @@ mod tests {
 
         node1._worker_handle.abort();
         node2._worker_handle.abort();
+    }
+
+    #[test]
+    fn prune_unresponsive_nodes_works() {
+        let registry = NodeRegistry::new();
+        let node1_info = NodeInfo {
+            id: "node1".to_string(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            command_port: 1,
+            status: NodeStatus::Healthy,
+            last_heartbeat: std::time::Instant::now(),
+        };
+        let node2_info = NodeInfo {
+            id: "node2".to_string(),
+            addr: "127.0.0.1:2".parse().unwrap(),
+            command_port: 2,
+            status: NodeStatus::Healthy,
+            last_heartbeat: std::time::Instant::now() - Duration::from_secs(60),
+        };
+        registry.add_node_for_test(node1_info);
+        registry.add_node_for_test(node2_info);
+
+        println!("[Test] Pruning nodes with timeout > 30s. Node2 heartbeat was set to 60s ago.");
+        registry.prune_unresponsive(Duration::from_secs(30));
+
+        let nodes = registry.get_all_nodes();
+        let node1_updated = nodes.iter().find(|n| n.id == "node1").unwrap();
+        let node2_updated = nodes.iter().find(|n| n.id == "node2").unwrap();
+
+        assert_eq!(node1_updated.status, NodeStatus::Healthy);
+        assert_eq!(node2_updated.status, NodeStatus::Unresponsive);
+    }
+
+    #[tokio::test]
+    async fn submit_distributed_falls_back_to_local_if_peer_unresponsive() {
+        let scheduler = RedScheduler::new();
+
+        let unresponsive_peer = NodeInfo {
+            id: "unresponsive_peer".to_string(),
+            addr: "127.0.0.1:9999".parse().unwrap(),
+            command_port: 9999,
+            status: NodeStatus::Unresponsive,
+            last_heartbeat: std::time::Instant::now(),
+        };
+        scheduler.node_registry.add_node_for_test(unresponsive_peer);
+
+        let model_config = crate::models::ModelConfig { learning_rate: 1.0 };
+        let metadata = crate::models::ModelMetadata::default();
+        let model = crate::models::RedModel {
+            id: "fallback_test_model".to_string(),
+            layers: vec![],
+            config: model_config,
+            metadata,
+        };
+        let config = crate::models::TrainingConfig {
+            model,
+            optimizer: Default::default(),
+            scheduler: Default::default(),
+            quantization: crate::models::QuantizationConfig {
+                mode: crate::models::QuantizationMode::PTQ,
+                bits: 8,
+            },
+            distributed: Default::default(),
+        };
+
+        let result = scheduler.submit_distributed_task(config).await;
+        assert!(result.is_ok());
     }
 }
 
