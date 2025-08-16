@@ -10,6 +10,41 @@
 #define REDCODE_FORCEINLINE inline
 #endif
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif // __AVX2__
+
+
+#ifdef __AVX2__
+/**
+ * @brief AVX2 implementation of the fast_tanh function.
+ *
+ * Processes 8 float values at once using 256-bit registers for high performance.
+ * This version is compiled only when AVX2 support is enabled.
+ *
+ * @param x A __m256 vector containing 8 floats.
+ * @return A __m256 vector with the tanh approximation applied to each float.
+ */
+inline __m256 fast_tanh_avx2(__m256 x) {
+    const __m256 c27 = _mm256_set1_ps(27.0f);
+    const __m256 c9 = _mm256_set1_ps(9.0f);
+
+    // x2 = x * x
+    __m256 x2 = _mm256_mul_ps(x, x);
+
+    // num = x * (27 + x2)
+    __m256 num_term = _mm256_add_ps(c27, x2);
+    __m256 num = _mm256_mul_ps(x, num_term);
+
+    // den = 27 + 9 * x2
+    __m256 den_term = _mm256_mul_ps(c9, x2);
+    __m256 den = _mm256_add_ps(c27, den_term);
+
+    // result = num / den
+    return _mm256_div_ps(num, den);
+}
+#endif // __AVX2__
+
 
 namespace redcode {
 

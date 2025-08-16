@@ -86,3 +86,27 @@ TEST_F(PhiNeuronEdgeCases, HandlesNonFiniteInputs) {
     EXPECT_NEAR(neuron.backward(inf, grad_out), phi * grad_out, 1e-6);
     EXPECT_NEAR(neuron.backward(-inf, grad_out), 0.0f, 1e-6);
 }
+
+#ifdef __AVX2__
+// Tests the AVX2 implementation of fast_tanh against the scalar version.
+TEST_F(PhiNeuronTest, FastTanhAVX2IsCorrect) {
+    // Create an array of 8 floats to test
+    alignas(32) float inputs[8] = {-10.0f, -5.0f, -1.0f, -0.5f, 0.5f, 1.0f, 5.0f, 10.0f};
+    alignas(32) float outputs[8];
+
+    // Load the inputs into an AVX2 vector
+    __m256 input_vec = _mm256_load_ps(inputs);
+
+    // Call the AVX2 function
+    __m256 output_vec = fast_tanh_avx2(input_vec);
+
+    // Store the results back into an array
+    _mm256_store_ps(outputs, output_vec);
+
+    // Compare each result with the scalar version
+    for (int i = 0; i < 8; ++i) {
+        float scalar_result = redcode::fast_tanh(inputs[i]);
+        EXPECT_NEAR(outputs[i], scalar_result, 1e-6);
+    }
+}
+#endif // __AVX2__
