@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <utility>
+#include <tuple>
 
 namespace redcode {
 namespace quantization {
@@ -35,6 +36,44 @@ inline std::pair<int8_t, int8_t> unpack_int4(uint8_t packed_val) {
     int8_t low_val = (low_nibble & 0x08) ? (low_nibble | 0xF0) : low_nibble;
 
     return {high_val, low_val};
+}
+
+/**
+ * @brief Packs four signed 2-bit integers into a single 8-bit unsigned integer.
+ * @param v1 Most significant 2 bits. Must be in [-2, 1].
+ * @param v2 Second most significant 2 bits. Must be in [-2, 1].
+ * @param v3 Third most significant 2 bits. Must be in [-2, 1].
+ * @param v4 Least significant 2 bits. Must be in [-2, 1].
+ * @return A uint8_t containing the four packed int2 values.
+ */
+inline uint8_t pack_int2(int8_t v1, int8_t v2, int8_t v3, int8_t v4) {
+    uint8_t b1 = (static_cast<uint8_t>(v1) & 0x03) << 6;
+    uint8_t b2 = (static_cast<uint8_t>(v2) & 0x03) << 4;
+    uint8_t b3 = (static_cast<uint8_t>(v3) & 0x03) << 2;
+    uint8_t b4 = static_cast<uint8_t>(v4) & 0x03;
+    return b1 | b2 | b3 | b4;
+}
+
+/**
+ * @brief Unpacks four signed 2-bit integers from a single 8-bit unsigned integer.
+ * @param packed_val The uint8_t containing the packed data.
+ * @return A tuple containing the four unpacked int2 values in order from most to least significant.
+ */
+inline std::tuple<int8_t, int8_t, int8_t, int8_t> unpack_int2(uint8_t packed_val) {
+    // Extract the 2-bit patterns
+    uint8_t p1 = (packed_val >> 6) & 0x03;
+    uint8_t p2 = (packed_val >> 4) & 0x03;
+    uint8_t p3 = (packed_val >> 2) & 0x03;
+    uint8_t p4 = packed_val & 0x03;
+
+    // Sign extend each 2-bit pattern to an 8-bit signed integer
+    // For 2's complement int2: 00=0, 01=1, 10=-2, 11=-1
+    int8_t v1 = (p1 & 0x02) ? (p1 | 0xFC) : p1;
+    int8_t v2 = (p2 & 0x02) ? (p2 | 0xFC) : p2;
+    int8_t v3 = (p3 & 0x02) ? (p3 | 0xFC) : p3;
+    int8_t v4 = (p4 & 0x02) ? (p4 | 0xFC) : p4;
+
+    return {v1, v2, v3, v4};
 }
 
 } // namespace quantization

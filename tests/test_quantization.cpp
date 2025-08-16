@@ -113,3 +113,43 @@ TEST_F(QuantizationTest, Int4SymmetricQuantizationCycle) {
     // original_tensor[0] is -1.0. Quantized should be -7. Dequantized should be -7 * (1/7) = -1.0
     EXPECT_NEAR(dequantized_tensor[0], -1.0f, 1e-6);
 }
+
+// Tests the full symmetric quantization and dequantization cycle for INT2.
+TEST_F(QuantizationTest, Int2SymmetricQuantizationCycle) {
+    // 1. Create original float tensor with size not a multiple of 4
+    redcode::RedTensor<float> original_tensor({1, 5});
+    // Values: -2.0, -1.0, 0.0, 1.0, 2.0
+    original_tensor[0] = -2.0f;
+    original_tensor[1] = -1.0f;
+    original_tensor[2] = 0.0f;
+    original_tensor[3] = 1.0f;
+    original_tensor[4] = 2.0f;
+
+    // 2. Quantize the tensor to int2
+    auto [quantized_tensor, params] = redcode::operators::quantize_symmetric_int2(original_tensor);
+
+    // 3. Verify quantization parameters and output shape
+    // abs_max is 2.0. scale = 2.0 / 2.0 = 1.0
+    EXPECT_NEAR(params.scale, 1.0f, 1e-6);
+    EXPECT_EQ(params.zero_point, 0);
+    // Packed size should be ceil(5/4) = 2
+    EXPECT_EQ(quantized_tensor.size(), 2);
+
+    // 4. Dequantize the tensor
+    redcode::RedTensor<float> dequantized_tensor = redcode::operators::dequantize_symmetric_int2(
+        quantized_tensor, original_tensor.shape(), params
+    );
+
+    // 5. Verify the error (RMSE) is within an acceptable tolerance for int2
+    float rmse = calculate_rmse(original_tensor, dequantized_tensor);
+    // The clamping of 2.0 to the max int2 value of 1 introduces error.
+    // Original: [-2, -1, 0, 1, 2], Dequantized: [-2, -1, 0, 1, 1]
+    // MSE = (0+0+0+0+(2-1)^2)/5 = 1/5 = 0.2. RMSE = sqrt(0.2) approx 0.447
+    EXPECT_LT(rmse, 0.5f);
+
+    // 6. Spot-check a dequantized value
+    EXPECT_NEAR(dequantized_tensor[0], -2.0f, 1e-6);
+    EXPECT_NEAR(dequantized_tensor[3], 1.0f, 1e-6);
+    // The value 2.0f should be clamped to 1.0f, the max of the int2 range.
+    EXPECT_NEAR(dequantized_tensor[4], 1.0f, 1e-6);
+}
