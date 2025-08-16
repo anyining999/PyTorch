@@ -8,7 +8,22 @@
 #include <stdexcept>
 #include <string>
 
+// Forward declaration
+namespace redcode { namespace quantization { class fp8_e4m3_t; } }
+
 namespace redcode {
+
+// Custom type trait to identify valid scalar types for RedTensor.
+template<typename T>
+struct is_redcode_scalar : std::is_arithmetic<T> {};
+
+// Specialize the trait for our custom FP8 type.
+template<>
+struct is_redcode_scalar<quantization::fp8_e4m3_t> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_redcode_scalar_v = is_redcode_scalar<T>::value;
+
 
 /// @brief Defines the target device for tensor operations and data storage.
 enum class Device {
@@ -29,7 +44,7 @@ enum class Device {
  */
 template<typename T>
 class RedTensor {
-    static_assert(std::is_arithmetic_v<T>, "T must be an arithmetic type");
+    static_assert(is_redcode_scalar_v<T>, "T must be a RedcodE scalar type (arithmetic or custom-defined)");
 
 private:
     T* data_ = nullptr;

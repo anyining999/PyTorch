@@ -3,6 +3,7 @@
 #include "redcode/red_tensor.h"
 #include "redcode/quantization/common.h"
 #include "redcode/quantization/packing.h"
+#include "redcode/quantization/fp8.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -116,6 +117,31 @@ dequantize_symmetric_int2(const RedTensor<uint8_t>& packed_tensor,
                 output_tensor[float_idx] = static_cast<float>(q_vals[j]) * params.scale;
             }
         }
+    }
+    return output_tensor;
+}
+
+// FP8 Kernels
+inline RedTensor<quantization::fp8_e4m3_t>
+convert_to_fp8_e4m3(const RedTensor<float>& input_tensor) {
+    if (input_tensor.size() == 0) {
+        return RedTensor<quantization::fp8_e4m3_t>();
+    }
+    RedTensor<quantization::fp8_e4m3_t> output_tensor(input_tensor.shape());
+    for (size_t i = 0; i < input_tensor.size(); ++i) {
+        output_tensor[i] = quantization::fp8_e4m3_t(input_tensor[i]);
+    }
+    return output_tensor;
+}
+
+inline RedTensor<float>
+convert_from_fp8_e4m3(const RedTensor<quantization::fp8_e4m3_t>& input_tensor) {
+    if (input_tensor.size() == 0) {
+        return RedTensor<float>();
+    }
+    RedTensor<float> output_tensor(input_tensor.shape());
+    for (size_t i = 0; i < input_tensor.size(); ++i) {
+        output_tensor[i] = static_cast<float>(input_tensor[i]);
     }
     return output_tensor;
 }
