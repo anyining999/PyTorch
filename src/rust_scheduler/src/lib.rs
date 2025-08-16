@@ -1,6 +1,8 @@
 pub mod models;
 pub mod error;
 pub mod quantization_manager;
+pub mod scheduler;
+pub mod fault_tolerance;
 pub mod distributed;
 pub mod data_pipeline;
 
