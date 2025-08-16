@@ -78,3 +78,38 @@ TEST_F(QuantizationTest, AllZerosTensor) {
     float rmse = calculate_rmse(original_tensor, dequantized_tensor);
     EXPECT_EQ(rmse, 0.0f);
 }
+
+// Tests the full symmetric quantization and dequantization cycle for INT4.
+TEST_F(QuantizationTest, Int4SymmetricQuantizationCycle) {
+    // 1. Create original float tensor with an odd number of elements
+    redcode::RedTensor<float> original_tensor({1, 7});
+    // Values: -1.0, -0.66, -0.33, 0.0, 0.33, 0.66, 1.0
+    for (size_t i = 0; i < original_tensor.size(); ++i) {
+        original_tensor[i] = (static_cast<float>(i) / 3.0f) - 1.0f;
+    }
+
+    // 2. Quantize the tensor to int4
+    auto [quantized_tensor, params] = redcode::operators::quantize_symmetric_int4(original_tensor);
+
+    // 3. Verify quantization parameters and output shape
+    // abs_max is 1.0. scale = 1.0 / 7.0 for int4 range [-8, 7]
+    EXPECT_NEAR(params.scale, 1.0f / 7.0f, 1e-6);
+    EXPECT_EQ(params.zero_point, 0);
+    // Packed size should be ceil(7/2) = 4
+    EXPECT_EQ(quantized_tensor.size(), 4);
+
+    // 4. Dequantize the tensor
+    redcode::RedTensor<float> dequantized_tensor = redcode::operators::dequantize_symmetric_int4(
+        quantized_tensor, original_tensor.shape(), params
+    );
+
+    // 5. Verify the error (RMSE) is within an acceptable tolerance for int4
+    float rmse = calculate_rmse(original_tensor, dequantized_tensor);
+    EXPECT_LT(rmse, 0.1f);
+
+    // 6. Spot-check a dequantized value
+    // original_tensor[6] is 1.0. Quantized should be 7. Dequantized should be 7 * (1/7) = 1.0
+    EXPECT_NEAR(dequantized_tensor[6], 1.0f, 1e-6);
+    // original_tensor[0] is -1.0. Quantized should be -7. Dequantized should be -7 * (1/7) = -1.0
+    EXPECT_NEAR(dequantized_tensor[0], -1.0f, 1e-6);
+}
