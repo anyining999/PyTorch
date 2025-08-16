@@ -58,3 +58,31 @@ TEST_F(PhiNeuronTest, BackwardPassIsCorrect) {
     const float expected3 = (0.0f + d_inhibit3) * grad_out;
     EXPECT_NEAR(neuron.backward(input3, grad_out), expected3, 1e-6);
 }
+
+// Test fixture for edge cases to align with "Super Engineer" quality standards.
+class PhiNeuronEdgeCases : public ::testing::Test {
+protected:
+    redcode::PhiNeuron neuron;
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float phi = redcode::PhiNeuron::PHI;
+};
+
+// Tests the forward and backward passes with non-finite inputs (inf, -inf, NaN).
+TEST_F(PhiNeuronEdgeCases, HandlesNonFiniteInputs) {
+    // Test forward pass with infinity
+    EXPECT_TRUE(std::isinf(neuron.forward(inf)) && neuron.forward(inf) > 0);
+
+    // Test forward pass with negative infinity
+    const float expected_neg_inf = (1.0f - phi) * -1.0f;
+    EXPECT_NEAR(neuron.forward(-inf), expected_neg_inf, 1e-6);
+
+    // Test forward pass with NaN
+    EXPECT_TRUE(std::isnan(neuron.forward(nan)));
+
+    // Test backward pass with non-finite inputs
+    const float grad_out = 1.0f;
+    EXPECT_TRUE(std::isnan(neuron.backward(nan, grad_out)));
+    EXPECT_NEAR(neuron.backward(inf, grad_out), phi * grad_out, 1e-6);
+    EXPECT_NEAR(neuron.backward(-inf, grad_out), 0.0f, 1e-6);
+}
