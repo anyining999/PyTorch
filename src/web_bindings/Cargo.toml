@@ -1,0 +1,11 @@
+[package]
+name = "redcode_web"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for the RedcodE framework."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
